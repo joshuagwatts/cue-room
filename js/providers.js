@@ -1,4 +1,4 @@
-/* Cue Room providers — build 1.
+/* Cue Room providers — build 2.
  * Link detection, title lookup, set/playlist expansion and the Spotify
  * swap matcher, ported from the limboverse/holoverse jukebox (the code
  * Joshua's rooms have run on since build 21, universal queue build 3).
@@ -298,8 +298,21 @@ export async function resolveBandcamp(url) {
   return w; // { kind, title, artist, tracks: [{title, durationSec, streamUrl}] }
 }
 
+/* Drive playback goes through the resolver worker's /drive proxy
+ * FIRST (build 2): Drive's own host sends Cross-Origin-Resource-Policy:
+ * same-site, and Chromium kills cross-origin media loads from it with
+ * ERR_BLOCKED_BY_ORB — public files included (reproduced 2026-10-25
+ * with a public FLAC: curl gets the bytes, a <video> element gets
+ * blocked). The worker re-serves the same bytes clean. The direct
+ * forms stay as fallbacks in case the worker is ever down. */
 export function driveStreamUrl(driveId) {
-  return 'https://drive.usercontent.google.com/download?id=' + driveId + '&export=download&confirm=t';
+  return RESOLVE_API + '/drive?id=' + encodeURIComponent(driveId);
+}
+export function driveFallbackUrls(driveId) {
+  return [
+    'https://drive.usercontent.google.com/download?id=' + encodeURIComponent(driveId) + '&export=download&confirm=t',
+    'https://drive.google.com/uc?export=download&id=' + encodeURIComponent(driveId),
+  ];
 }
 
 /* ---------- Spotify swap matcher (A3F: version fidelity is the only job) ---------- */

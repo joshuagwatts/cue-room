@@ -1,4 +1,4 @@
-/* Cue Room — build 1.
+/* Cue Room — build 2.
  * The limboverse jukebox, out of the game and into its own app.
  *
  * One room = one shared queue. Anyone in the room can add a link;
@@ -13,16 +13,16 @@
  * canonical queue, broadcasts syncs, inherits the line via handoff
  * when elected, and advances past broken tracks so the room never
  * wedges on a dead link. */
-import { Relay } from './relay.js?v=1';
+import { Relay } from './relay.js?v=2';
 import {
   detectProvider, fallbackTitle, extractUrl, fetchTitle, sniffAudioContentType,
   resolveShortSCLink, resolveSCSet, resolveYTPlaylist, resolveBandcamp,
   driveStreamUrl, swapIdentifySpotify, swapSearchYT, swapMatch, swapJudge,
   swapAuditText, validAdd, validPlay, MAX_QUEUE,
-} from './providers.js?v=1';
-import { Player } from './player.js?v=1';
+} from './providers.js?v=2';
+import { Player } from './player.js?v=2';
 
-const BUILD = 1;
+const BUILD = 2;
 const APP_TAG = 'cueroom_by_holowatts';
 const HELLO_MS = 8000, ROSTER_TTL_MS = 25000, SYNC_MS = 10000, HANDOFF_MS = 2500;
 const ACK_MS = 20000, ACK_RETRIES = 8;

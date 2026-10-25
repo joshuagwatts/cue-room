@@ -52,6 +52,26 @@ together as a team, and a skip needs TWO votes to confirm.
 - `js/player.js` — YT / SC / direct-media players + watchdogs
 - `js/vendor/qrcode.js` — vendored QR generator (from limboverse)
 
+## Build 2 — Drive ORB fix (2026-10-25, Joshua's report: "says a drive file isn't public and skips it when it is public")
+
+- ROOT CAUSE (reproduced, not guessed): Drive's download host sends
+  `Cross-Origin-Resource-Policy: same-site`; Chromium kills a
+  cross-origin media-element load from it with
+  `ERR_BLOCKED_BY_ORB` — public files included. Verified with a real
+  public FLAC: curl gets `200 audio/flac` + ranges, the app's
+  `<video>` element gets ORB-blocked and errors instantly. The build-1
+  error text ("isn't public") was wrong about the cause.
+- FIX: playback goes through the resolver worker's new `/drive?id=`
+  proxy — it fetches the bytes server-side (handling Google's
+  virus-scan interstitial form for large files), forwards Range, and
+  re-serves with CORS * and no CORP header. Player falls back to
+  Drive's own two URL forms if the proxy ever fails, and only skips
+  after every candidate fails. Error copy no longer asserts the file
+  "isn't public".
+- PROOF: `cue-drive.mjs` against the real public file — build 1:
+  ORB-blocked + skipped; build 2: 206 ranges via the worker, playing,
+  duration known, clock advancing. Full `cue-room.mjs` still ALL PASS.
+
 ## Known limits
 
 - Two-phone live proof is Joshua's phones, as with limboverse: this

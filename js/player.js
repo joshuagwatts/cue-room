@@ -1,4 +1,4 @@
-/* Cue Room player — build 1.
+/* Cue Room player — build 2.
  * One player at a time, driven by the room clock: play(item, offsetSec).
  * Providers: youtube (IFrame API, visible stage), soundcloud (widget API,
  * visible stage), direct-audio / bandcamp / drive (one <video> element —
@@ -8,7 +8,7 @@
  * Load watchdog: if nothing is playing 15s after start, onError fires —
  * a dead track skips itself instead of wedging the room (limbo build 104).
  */
-import { loadYTApi, loadSCApi, isShortSCLink, resolveShortSCLink, driveStreamUrl } from './providers.js?v=1';
+import { loadYTApi, loadSCApi, isShortSCLink, resolveShortSCLink, driveStreamUrl, driveFallbackUrls } from './providers.js?v=2';
 
 const WATCHDOG_MS = 15000;
 
@@ -178,10 +178,20 @@ export class Player {
     const el = this.els.media;
     el.style.display = '';
     el.controls = true;
-    el.src = item.provider === 'bandcamp' ? item.streamUrl
-      : item.provider === 'drive' ? driveStreamUrl(item.driveId)
-      : item.url;
     el.volume = this.volume;
+    // Drive gets a candidate chain: worker proxy (ORB-safe) first, then
+    // Drive's own hosts. An error only skips the track after EVERY
+    // candidate has failed — one bad host must not kill a public file.
+    const candidates = item.provider === 'bandcamp' ? [item.streamUrl]
+      : item.provider === 'drive' ? [driveStreamUrl(item.driveId), ...driveFallbackUrls(item.driveId)]
+      : [item.url];
+    let attempt = 0;
+    const mySeq = (this._mediaSeq = (this._mediaSeq || 0) + 1);
+    const tryNext = () => {
+      if (this.currentId !== item.id || this._mediaSeq !== mySeq) return;
+      el.src = candidates[attempt];
+      try { el.load(); } catch (e) {}
+    };
     const onMeta = () => {
       if (this.currentId !== item.id) return;
       if (el.duration > 0) this.hooks.onDuration(el.duration);
@@ -195,11 +205,12 @@ export class Player {
     el.onplaying = () => this.hooks.onPlaying();
     el.onended = () => { if (this.currentId === item.id) this.hooks.onEnded(); };
     el.onerror = () => {
-      if (this.currentId === item.id) {
-        this.hooks.onError(item.provider === 'drive'
-          ? 'that drive file isn\u2019t public or isn\u2019t playable — skipping'
-          : 'that file wouldn\u2019t play — skipping');
-      }
+      if (this.currentId !== item.id || this._mediaSeq !== mySeq) return;
+      attempt++;
+      if (attempt < candidates.length) { tryNext(); return; }
+      this.hooks.onError(item.provider === 'drive'
+        ? 'drive wouldn\u2019t serve that file to the room — check it\u2019s shared with \u201canyone with the link\u201d, or try another link'
+        : 'that file wouldn\u2019t play — skipping');
     };
     this.impl = {
       play: () => el.play(), pause: () => el.pause(),
@@ -209,6 +220,6 @@ export class Player {
       setVolume: (v) => { try { el.volume = v / 100; } catch (e) {} },
       destroy: () => { el.onloadedmetadata = null; el.onplaying = null; el.onended = null; el.onerror = null; },
     };
-    try { el.load(); } catch (e) {}
+    tryNext();
   }
 }
