@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cue Room — listen together</title>
+<meta name="description" content="One shared queue for the whole hangout. Scan, join, add a link — everyone hears the same thing at the same time.">
+<meta name="theme-color" content="#0b0b10">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/style.css?v=1">
+<script src="js/vendor/qrcode.js?v=1"></script>
+</head>
+<body>
+
+<!-- ============ LANDING ============ -->
+<main id="landing">
+  <div class="logo">🎧</div>
+  <h1>Cue Room</h1>
+  <p class="tag">One shared queue for the whole hangout.<br>Everyone hears the same thing, at the same time.</p>
+
+  <label class="field">
+    <span>Your name</span>
+    <input id="name-input" type="text" maxlength="16" autocomplete="off" placeholder="your name">
+  </label>
+
+  <button id="create-btn" class="big primary">Create a room</button>
+
+  <div class="divider"><span>or join one</span></div>
+
+  <div class="join-row">
+    <input id="join-code" type="text" maxlength="6" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="CODE">
+    <button id="join-btn" class="big">Join</button>
+  </div>
+  <p class="hint" id="landing-hint">Got a link or a QR from a friend? Just open it — you're in.</p>
+  <p class="build">Cue Room build 1</p>
+</main>
+
+<!-- ============ ROOM ============ -->
+<main id="room" style="display:none">
+  <header class="room-head">
+    <div class="room-title">
+      <span class="logo-sm">🎧</span>
+      <div>
+        <div class="room-name">Cue Room <span id="room-code-label" class="code"></span></div>
+        <div id="conn-label" class="conn">connecting…</div>
+      </div>
+    </div>
+    <div class="head-btns">
+      <button id="share-btn">📷 Share / QR</button>
+      <button id="leave-btn" class="ghost">Leave</button>
+    </div>
+  </header>
+
+  <section id="share-panel" style="display:none">
+    <p class="share-lead">Friends scan this — they're in instantly. No app, no account.</p>
+    <div id="qr-box"></div>
+    <div id="share-link" class="share-link"></div>
+    <div class="row">
+      <button id="copy-link-btn" class="primary">Copy link</button>
+      <button id="close-share-btn" class="ghost">Close</button>
+    </div>
+  </section>
+
+  <section id="people-bar">
+    <span id="people-label">👥 Just you so far — share the QR to bring people in</span>
+    <div id="people-list"></div>
+  </section>
+
+  <section id="now-card">
+    <div class="sub-label">NOW PLAYING</div>
+    <div id="now-title" class="now-title">Nothing yet — add the first track</div>
+    <div id="now-sub" class="now-sub"></div>
+    <div id="stage">
+      <div id="stage-yt"></div>
+      <div id="stage-sc"></div>
+      <video id="stage-media" playsinline style="display:none"></video>
+      <div id="stage-idle">🎵</div>
+    </div>
+    <button id="join-music-btn" class="big primary" style="display:none">▶ Tap to join the music</button>
+    <div class="progress"><div id="progress-fill"></div></div>
+    <div class="time-row"><span id="time-pos">0:00</span><span id="time-dur"></span></div>
+    <div class="now-actions">
+      <button id="skip-btn" class="skip" disabled>⏭ Skip</button>
+      <span id="skip-note" class="skip-note">Skip needs 2 votes</span>
+    </div>
+    <div class="vol-row"><span>vol</span><input id="vol" type="range" min="0" max="100" value="80"></div>
+    <div id="now-audit"></div>
+  </section>
+
+  <section id="queue-card">
+    <div class="sub-label">UP NEXT <span id="queue-count"></span></div>
+    <div id="queue-list"><div class="empty">Queue is empty — drop a link below</div></div>
+  </section>
+
+  <section id="swap-card" style="display:none"></section>
+
+  <section id="feed-card">
+    <div class="sub-label">ROOM</div>
+    <div id="feed"></div>
+  </section>
+
+  <footer id="add-bar">
+    <input id="add-url" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
+      placeholder="Paste a YouTube / SoundCloud / Spotify / Bandcamp / Drive / mp3 link…">
+    <button id="add-btn" class="primary">Cue it</button>
+    <div id="add-hint" class="add-hint"></div>
+  </footer>
+</main>
+
+<script type="module" src="js/app.js?v=1"></script>
+</body>
+</html>
