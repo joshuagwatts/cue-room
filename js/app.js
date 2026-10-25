@@ -22,7 +22,7 @@ import {
 } from './providers.js?v=2';
 import { Player } from './player.js?v=2';
 
-const BUILD = 3;
+const BUILD = 4;
 const APP_TAG = 'cueroom_by_holowatts';
 const HELLO_MS = 8000, ROSTER_TTL_MS = 25000, SYNC_MS = 10000, HANDOFF_MS = 2500;
 const ACK_MS = 20000, ACK_RETRIES = 8;
@@ -84,6 +84,10 @@ const S = {
   unlocked: false,
   errAdvancedFor: null, endedNotifiedFor: null, badReportedFor: null,
   swapVerifyPending: null,
+  nowOriginCid: null,          // whose clock startedAt belongs to (skew)
+  badReports: new Map(),       // trackId -> Set of reporter cids (build 4)
+  badPosAtReport: null,        // holder's own pos when first bad landed
+  selfHealFor: null,           // track id we already self-healed once
 };
 
 /* ---------------- dom ---------------- */
@@ -107,7 +111,7 @@ if (myName) nameInput.value = myName;
 const player = new Player(
   { yt: $('stage-yt'), sc: $('stage-sc'), media: $('stage-media'), idle: $('stage-idle') },
   {
-    offsetFor: () => (S.now ? Math.max(0, (Date.now() - S.now.startedAt) / 1000) : 0),
+    offsetFor: () => offsetFor(S.now),
     onEnded: () => onPlayerEnded(),
     onError: (msg) => onTrackError(msg),
     onPlaying: () => { joinMusicBtn.style.display = 'none'; },
@@ -187,8 +191,26 @@ function restore() {
 
 function send(obj) {
   if (!S.relay) return false;
-  return S.relay.publish({ cid: myCid, name: myName, ...obj });
+  return S.relay.publish({ cid: myCid, name: myName, at: Date.now(), ...obj });
 }
+
+/* ---------------- clock skew (build 4) ----------------
+ * startedAt lives in the ORIGIN device's clock. A phone whose clock is
+ * a few seconds off would compute a permanently wrong position and
+ * chase resyncs forever. Every message now carries the sender's `at`;
+ * from the play that started the current track (and the origin's
+ * syncs after it) we estimate skew = senderClock - myClock. Samples
+ * are biased low by network transit, so the MAX sample is the honest
+ * one. offsetFor() runs on the corrected clock. */
+let skewSamples = [];
+function noteSkew(senderAt) {
+  if (!senderAt || !Number.isFinite(senderAt)) return;
+  skewSamples.push(senderAt - Date.now());
+  if (skewSamples.length > 6) skewSamples.shift();
+}
+function resetSkew(senderAt) { skewSamples = []; noteSkew(senderAt); }
+function clockSkew() { return skewSamples.length ? Math.max(...skewSamples) : 0; }
+function correctedNow() { return Date.now() + clockSkew(); }
 
 function startRoom(code) {
   S.room = code;
@@ -231,8 +253,8 @@ function handleMessage(obj) {
     case 'remove': handleRemove(obj); break;
     case 'play': handlePlay(obj); break;
     case 'skipVote': handleSkipVote(obj); break;
-    case 'ended': if (S.iAmHolder && S.now && obj.id === S.now.id) advance(); break;
-    case 'bad': if (S.iAmHolder && S.now && obj.id === S.now.id) scheduleErrorAdvance(obj.id); break;
+    case 'ended': handlePeerEnded(obj); break;
+    case 'bad': handlePeerBad(obj); break;
     case 'title': handleTitle(obj); break;
     case 'note': feed(String(obj.text || '').slice(0, 200)); break;
     case 'stateReq': handleStateReq(obj); break;
@@ -293,7 +315,11 @@ function finishHandoff() {
   S.holderCatchingUp = false;
   let best = null;
   const consider = (queue, now, at) => {
-    const score = (Array.isArray(queue) ? queue.length : 0) + (now ? 100 : 0);
+    // Build 4: a now-playing beats a bare queue, and between two
+    // now-playings the one that STARTED LATER is the room's present —
+    // the old score could resurrect a previous track from a lagging
+    // peer and jump the whole room backwards.
+    const score = (now ? 1e13 + (now.startedAt || 0) : 0) + (Array.isArray(queue) ? queue.length : 0);
     if (!best || score > best.score || (score === best.score && (at || 0) > (best.at || 0))) {
       best = { queue: queue || [], now: now || null, at: at || 0, score };
     }
@@ -351,7 +377,8 @@ function handleSync(obj) {
     S.lastKnown = { queue: incoming.slice(0, MAX_QUEUE), now: (dn && validPlay(dn) && !dn.stopped) ? dn : null, at: obj.at || Date.now() };
   }
   if (dn && validPlay(dn) && !dn.stopped) {
-    if (!S.now || S.now.id !== dn.id) adoptPlay(dn);
+    if (!S.now || S.now.id !== dn.id) { resetSkew(obj.at); adoptPlay(dn, obj.cid); }
+    else if (obj.cid === S.nowOriginCid) noteSkew(obj.at);
   } else if (dn && dn.stopped && S.now && (dn.startedAt || 0) >= S.nowStartedAt) {
     stopPlayback();
   }
@@ -376,7 +403,8 @@ function handleState(obj) {
   }
   const q = (Array.isArray(obj.queue) ? obj.queue : []).filter(validAdd);
   if (obj.now && validPlay(obj.now) && !obj.now.stopped) {
-    if (!S.now || S.now.id !== obj.now.id) adoptPlay(obj.now);
+    if (!S.now || S.now.id !== obj.now.id) { resetSkew(obj.at); adoptPlay(obj.now, obj.cid); }
+    else if (obj.cid === S.nowOriginCid) noteSkew(obj.at);
   }
   if (q.length && !S.queue.length) { S.queue = q; sortQueue(); }
   S.lastKnown = { queue: q, now: obj.now || null, at: obj.at || Date.now() };
@@ -461,7 +489,7 @@ async function enrichTitle(t) {
 
 /* ---------------- playback / room clock ---------------- */
 
-function offsetFor(now) { return Math.max(0, (Date.now() - (now ? now.startedAt : Date.now())) / 1000); }
+function offsetFor(now) { const n = correctedNow(); return Math.max(0, (n - (now ? now.startedAt : n)) / 1000); }
 
 function advance() {
   const next = S.queue.shift() || null;
@@ -473,14 +501,18 @@ function advance() {
   }
   const play = { ...next, startedAt: Date.now(), by: myName };
   send({ t: 'play', track: play });
-  adoptPlay(play);
+  resetSkew(Date.now());
+  adoptPlay(play, myCid);
   if (S.iAmHolder) broadcastSync();
   return play;
 }
-function adoptPlay(play) {
+function adoptPlay(play, originCid) {
   S.now = { ...play };
   S.nowStartedAt = play.startedAt;
   S.adoptedAt = Date.now();
+  if (originCid) S.nowOriginCid = originCid;
+  S.badReports = new Map();
+  S.selfHealFor = null;
   S.skipVotes = new Map();
   S.errAdvancedFor = null; S.endedNotifiedFor = null; S.badReportedFor = null;
   const i = S.queue.findIndex((t) => t.id === play.id);
@@ -495,6 +527,7 @@ function adoptPlay(play) {
 function stopPlayback() {
   S.now = null; S.nowStartedAt = 0;
   S.skipVotes = new Map();
+  S.badReports = new Map();
   player.stop();
   persist();
   renderAll();
@@ -511,7 +544,8 @@ function handlePlay(obj) {
   const inContention = Date.now() - S.adoptedAt < 1500;
   if (S.now && d.id === S.now.id && !inContention) return;
   if (inContention && S.now && d.startedAt >= S.nowStartedAt) return; // earlier claim wins
-  adoptPlay(d);
+  resetSkew(obj.at);
+  adoptPlay(d, obj.cid);
   if (S.iAmHolder) broadcastSync();
 }
 function onPlayerEnded() {
@@ -530,6 +564,40 @@ function scheduleErrorAdvance(id) {
     if (S.now && S.now.id === id && S.iAmHolder) advance();
   }, 2500);
 }
+
+/* Build 4 — a peer's player is not the room's timeline:
+ * one guest's broken player (region block, ad stall, dead stream on
+ * THEIR end) must never skip the track for everyone. The holder only
+ * advances on a peer report when it's corroborated (2+ distinct
+ * reporters) or the holder's OWN player also isn't progressing —
+ * the holder's playback is the ground truth for "this track is bad". */
+function handlePeerBad(obj) {
+  notePeer(obj.cid, obj.name);
+  if (!S.iAmHolder || !S.now || obj.id !== S.now.id) return;
+  const id = S.now.id;
+  if (!S.badReports.has(id)) { S.badReports.set(id, new Set()); S.badPosAtReport = player.pos(); }
+  S.badReports.get(id).add(obj.cid);
+  setTimeout(() => {
+    if (!S.now || S.now.id !== id || !S.iAmHolder) return;
+    const reporters = S.badReports.has(id) ? S.badReports.get(id).size : 0;
+    const pos = player.pos();
+    const mineStuck = pos == null || (S.badPosAtReport != null && Math.abs(pos - S.badPosAtReport) < 0.3);
+    if (reporters >= 2 || mineStuck) scheduleErrorAdvance(id);
+  }, 2600);
+}
+
+/* A peer's "ended" is a hint, not a command: their player can end
+ * early (a shorter cut, an ad-shortened stream) while the track has
+ * minutes left here. Honor it only when the room clock says we're
+ * actually at the end. */
+function handlePeerEnded(obj) {
+  notePeer(obj.cid, obj.name);
+  if (!S.iAmHolder || !S.now || obj.id !== S.now.id) return;
+  const el = offsetFor(S.now);
+  const dur = S.now.durationMs ? S.now.durationMs / 1000 : player.dur();
+  if (dur && dur > 0) { if (el >= dur - 15) advance(); }
+  else if (el >= 30) advance();
+}
 function onTrackError(msg) {
   if (!S.now) return;
   const id = S.now.id;
@@ -537,12 +605,32 @@ function onTrackError(msg) {
   if (S.iAmHolder) {
     roomNote('⏭ Couldn\u2019t play “' + S.now.title.slice(0, 60) + '” — skipping', true);
     scheduleErrorAdvance(id);
-  } else if (S.badReportedFor !== id) {
+    return;
+  }
+  /* Build 4: I'm not the holder — my player failing is MY problem,
+   * not the room's. Report it (the holder weighs it with everyone
+   * else's reports), then heal MY playback against the room clock.
+   * One broken phone can no longer skip the song for the whole room. */
+  if (S.badReportedFor !== id) {
     S.badReportedFor = id;
     send({ t: 'bad', id });
-    // If no holder answers, don't leave the room wedged: after 6s the
-    // reporter advances (contention rules sort out duplicates).
-    setTimeout(() => { if (S.now && S.now.id === id && !S.iAmHolder) advance(); }, 6000);
+  }
+  if (!S.holderCid || S.holderCid === myCid) {
+    // No holder to appeal to — old anti-wedge fallback stays.
+    setTimeout(() => {
+      if (S.now && S.now.id === id && !S.iAmHolder && (!S.holderCid || S.holderCid === myCid)) advance();
+    }, 6000);
+    return;
+  }
+  if (S.selfHealFor !== id) {
+    S.selfHealFor = id;
+    feed('That track won\u2019t play on your device — the room\u2019s still on it; resyncing you');
+    setTimeout(() => {
+      if (S.now && S.now.id === id && !S.iAmHolder) {
+        send({ t: 'stateReq', reqId: makeId() });
+        player.play(S.now, offsetFor(S.now));
+      }
+    }, 1500);
   }
 }
 
@@ -613,10 +701,17 @@ function tick() {
     p.retries++; p.sentAt = now;
     send({ t: 'add', track: p.track });
   }
-  // end watchdog: track is well past its known duration and nobody advanced
+  // end watchdog: track is well past its known duration and nobody
+  // advanced. Build 4: the duration itself is cross-examined first —
+  // if my player is happily playing PAST the "duration" (an ad's
+  // length got recorded, a wrong metadata value), the duration is
+  // the liar, not the track: distrust it instead of skipping.
   if (S.now && S.now.durationMs) {
+    const dur = S.now.durationMs / 1000;
     const elapsed = offsetFor(S.now);
-    if (elapsed > S.now.durationMs / 1000 + 10) onPlayerEnded();
+    const pos = player.pos();
+    if (pos != null && pos > dur + 3) S.now.durationMs = null;
+    else if (elapsed > dur + 10 && (pos == null || pos >= dur - 1.5)) onPlayerEnded();
   }
   renderConn();
 }
@@ -1114,4 +1209,5 @@ window.__cue = {
   inAd: () => player.inAd(),
   seekTo: (s) => player.seekTo(s),
   expected: () => (S.now ? offsetFor(S.now) : null),
+  skew: () => clockSkew(),
 };

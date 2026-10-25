@@ -107,6 +107,44 @@ joiner lands mid-track at 0.05s drift; pages 0.35s apart; forced +5s
 drift → one resync → 0.04s, playback advance a clean 3.00s per 3s
 before and after. Full suite + drive test still pass.
 
+## Build 4 — steady timeline audit (2026-10-25, Joshua: "double check anything that might jump the timeline or sync for anyone tapped in even the host")
+
+Full audit of every code path that can move someone's playback.
+Six jump sources found and fixed:
+
+1. ONE peer's "bad" report made the HOLDER skip the track for the
+   whole room. Now: holder advances on peer reports only with
+   corroboration (2+ distinct reporters) or when the holder's own
+   player also isn't progressing — the holder's playback is ground
+   truth for "this track is broken".
+2. A non-holder's own player error fell back (6s) to advancing the
+   ROOM. Now: report + self-heal (re-request state, restart own
+   player at the room position). One broken phone can't skip the
+   song for everyone. The no-holder anti-wedge fallback stays.
+3. A peer's "ended" advanced the holder INSTANTLY — a guest whose
+   player ended early (shorter cut, ad-truncated stream) cut the
+   track for all. Now honored only inside the end window (elapsed
+   within 15s of known duration, or 30s+ when duration unknown).
+4. The end watchdog trusted durationMs blindly; a wrong duration
+   (e.g. an ad's length recorded at ready) could false-fire a skip.
+   Now: if the player is playing PAST the stated duration, the
+   duration is discarded as the liar it is.
+5. NO clock-skew correction existed: a phone with a fast/slow clock
+   computed a permanently wrong position and chased resyncs forever.
+   Every message now carries sender `at`; skew (max of recent
+   samples vs the track's origin) corrects offsetFor centrally.
+6. Handoff merge scored a stale now-playing equal to a fresh one —
+   a lagging peer could resurrect the previous track on holder
+   change. Freshness (startedAt) now dominates the score.
+
+PROOF (cue-steady.mjs): A) 1 bad report → no skip; B) 2nd distinct
+report → skip lands; C) early "ended" at 0.8s into a 45s track →
+ignored; D) track injected from a +3000ms clock → skew estimated
+2998ms, expected position reads the true 10.08s (not 7s), playback
+tracks at 0.04s. Full suite, sync suite, drive test: all pass.
+(Test note: the main suite's solo-skip step now waits out the fake
+voter's 25s roster TTL — it previously passed on timing luck.)
+
 ## Known limits
 
 - Two-phone live proof is Joshua's phones, as with limboverse: this
