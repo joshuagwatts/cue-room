@@ -30,6 +30,19 @@ export class Player {
     if (this.kind === 'media') { try { this.els.media.volume = v01; } catch (e) {} }
   }
   pos() { try { return this.impl ? this.impl.pos() : null; } catch (e) { return null; } }
+  inAd() { try { return !!(this.impl && this.impl.inAd && this.impl.inAd()); } catch (e) { return false; } }
+  /* How much of the media element's file is actually buffered. A seek
+   * past the buffered end restarts the download from scratch on hosts
+   * without snappy range serving — the opposite of a clean resync —
+   * so the app checks this before seeking a media track. Null for
+   * iframe players (their own buffering is their business). */
+  bufferedEnd() {
+    if (this.kind !== 'media') return null;
+    try {
+      const b = this.els.media.buffered;
+      return b && b.length ? b.end(b.length - 1) : 0;
+    } catch (e) { return null; }
+  }
   dur() { try { return this.impl ? this.impl.dur() : null; } catch (e) { return null; } }
   seekTo(s) { if (this.impl) { try { this.impl.seekTo(s); } catch (e) {} } }
   playPauseResume() { if (this.impl) { try { this.impl.play(); } catch (e) {} } }
@@ -53,6 +66,15 @@ export class Player {
       const p = this.pos();
       const playing = this.kind === 'media' ? !this.els.media.paused : (p != null && p > 0.05);
       if (playing) return;
+      // Still actively loading (bytes flowing, not enough buffered)?
+      // Give it one more window instead of skipping a slow-but-alive
+      // track — sync machinery must never punish a load in progress.
+      if (this.kind === 'media' && !this._wdExtended &&
+          this.els.media.networkState === 2 && this.els.media.readyState < 3) {
+        this._wdExtended = true;
+        this._armWatchdog(id, null);
+        return;
+      }
       if (retry) { try { retry(); } catch (e) {} this._armWatchdog(id, null); return; }
       this.hooks.onError('that track wouldn\u2019t start — skipping');
     }, WATCHDOG_MS);
@@ -60,6 +82,7 @@ export class Player {
 
   async play(item, offsetSec) {
     this.stop();
+    this._wdExtended = false;
     this.currentId = item.id;
     this.els.idle.style.display = 'none';
     if (item.provider === 'youtube') this._playYT(item, offsetSec);
@@ -77,6 +100,7 @@ export class Player {
     this.els.yt.classList.add('on');
     const slot = document.createElement('div');
     this.els.yt.appendChild(slot);
+    let ytInAd = false, ytAdPoll = null;
     loadYTApi((ok) => {
       if (this.currentId !== item.id) { try { slot.remove(); } catch (e) {} return; }
       if (!ok || !window.YT) { this.hooks.onError('youtube isn\u2019t loading — check your connection'); return; }
@@ -93,9 +117,31 @@ export class Player {
               try { ev.target.playVideo(); } catch (e) {}
               const d = (() => { try { return ev.target.getDuration(); } catch (e) { return 0; } })();
               if (d > 0) this.hooks.onDuration(d);
+              // Watchdog retry is a play() nudge ONLY — never a reload.
+              // Reloading a slow-loading video restarts its buffering
+              // from zero; the room clock doesn't get to punish loads.
               this._armWatchdog(item.id, () => {
-                try { ev.target.loadVideoById(item.videoId, Math.max(0, this.hooks.offsetFor ? this.hooks.offsetFor() : 0)); } catch (e) {}
+                try { ev.target.playVideo(); } catch (e) {}
               });
+              // Ad detection (build 3): YouTube's sealed player gives
+              // no ad events, but during an ad getDuration() flips to
+              // the AD's length. While flipped: pos() reports null (so
+              // the room never chases the ad timeline), and when the
+              // flip ends the app does ONE clean seek back to the room.
+              let contentDur = d > 0 ? d : 0;
+              const adPoll = setInterval(() => {
+                if (this.currentId !== item.id) { clearInterval(adPoll); return; }
+                let dd = 0;
+                try { dd = ev.target.getDuration() || 0; } catch (e) {}
+                if (dd <= 0) return;
+                if (!contentDur) { contentDur = dd; return; }
+                const inAdNow = Math.abs(dd - contentDur) > 1.5;
+                if (inAdNow !== ytInAd) {
+                  ytInAd = inAdNow;
+                  if (this.hooks.onAdChange) { try { this.hooks.onAdChange(ytInAd); } catch (e) {} }
+                }
+              }, 1000);
+              ytAdPoll = adPoll;
             },
             onStateChange: (ev) => {
               if (ev.data === window.YT.PlayerState.PLAYING) this.hooks.onPlaying();
@@ -107,10 +153,13 @@ export class Player {
         this.impl = {
           play: () => p.playVideo(), pause: () => p.pauseVideo(),
           seekTo: (s) => p.seekTo(s, true),
-          pos: () => { try { return p.getCurrentTime(); } catch (e) { return null; } },
+          // During an ad the iframe's clock is the AD's clock — report
+          // nothing, so drift logic leaves this player completely alone.
+          pos: () => { if (ytInAd) return null; try { return p.getCurrentTime(); } catch (e) { return null; } },
           dur: () => { try { return p.getDuration() || null; } catch (e) { return null; } },
+          inAd: () => ytInAd,
           setVolume: (v) => { try { p.setVolume(v); } catch (e) {} },
-          destroy: () => { try { p.destroy(); } catch (e) {} },
+          destroy: () => { if (ytAdPoll) clearInterval(ytAdPoll); try { p.destroy(); } catch (e) {} },
         };
       } catch (e) { this.hooks.onError('youtube player failed to start'); }
     });

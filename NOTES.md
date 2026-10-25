@@ -72,6 +72,41 @@ together as a team, and a skip needs TWO votes to confirm.
   ORB-blocked + skipped; build 2: 206 ranges via the worker, playing,
   duration known, clock advancing. Full `cue-room.mjs` still ALL PASS.
 
+## Build 3 — clean sync + ad-proofing (2026-10-25, Joshua's spec)
+
+His words: sync must not hinder loading or playback; milliseconds off
+is fine, more than ~1s behind stops feeling together; a refresh-style
+clean resync is the model. Rules now in the code:
+
+- DRIFT_TOLERANCE = 1.0s. Inside it: hands off entirely — no seeks, no
+  playback-rate tricks, nothing. Past it: ONE clean seek to the room
+  position, at most once per 15s (SEEK_COOLDOWN), checked every 4s.
+- Never seek a frozen needle: if the position hasn't moved between
+  checks the player is still LOADING — a seek there just restarts its
+  buffering. The resync waits until it's actually playing.
+- Never seek past the buffered end of a media element (player.
+  bufferedEnd guard): landing in unbuffered territory restarts the
+  download; the seek fires on a later check once the target is in
+  range. (Found by the sync prove-out: a range-less test server made
+  naive seeks thrash a track back to 0 repeatedly.)
+- Slow loads are never punished: the YouTube watchdog retry is now a
+  play() nudge, not loadVideoById (which restarted buffering from
+  zero); the media watchdog grants one extension while bytes are
+  actively flowing.
+- YouTube ads: no adblocker can live inside YouTube's sealed iframe,
+  so instead ads are made sync-proof. During an ad, getDuration()
+  flips to the ad's length (the embed's only tell) — while flipped,
+  the player reports no position, drift logic leaves it completely
+  alone, the room clock keeps running for everyone else, and when the
+  ad ends ONE clean seek snaps that listener back onto the room.
+  Caveat: the duration-flip heuristic is code-verified, not ad-verified
+  (sandbox players don't draw real ads); it proves itself in real use.
+
+PROOF (cue-sync.mjs, local range-served 60s file, two contexts):
+joiner lands mid-track at 0.05s drift; pages 0.35s apart; forced +5s
+drift → one resync → 0.04s, playback advance a clean 3.00s per 3s
+before and after. Full suite + drive test still pass.
+
 ## Known limits
 
 - Two-phone live proof is Joshua's phones, as with limboverse: this

@@ -1,4 +1,4 @@
-/* Cue Room — build 2.
+/* Cue Room — build 3.
  * The limboverse jukebox, out of the game and into its own app.
  *
  * One room = one shared queue. Anyone in the room can add a link;
@@ -22,7 +22,7 @@ import {
 } from './providers.js?v=2';
 import { Player } from './player.js?v=2';
 
-const BUILD = 2;
+const BUILD = 3;
 const APP_TAG = 'cueroom_by_holowatts';
 const HELLO_MS = 8000, ROSTER_TTL_MS = 25000, SYNC_MS = 10000, HANDOFF_MS = 2500;
 const ACK_MS = 20000, ACK_RETRIES = 8;
@@ -115,6 +115,15 @@ const player = new Player(
       if (S.now && sec > 0) { S.now.durationMs = Math.round(sec * 1000); renderNow(); }
     },
     onTitle: (t) => { if (S.now) { S.now.title = t; renderNow(); } },
+    onAdChange: (inAd) => {
+      // An ad on YOUR screen only (build 3): the room clock keeps
+      // running for everyone else; you sit the ad out, then ONE clean
+      // seek puts you back exactly on the room — no chasing, no
+      // repeated seeks while the ad plays.
+      if (!S.now) return;
+      if (inAd) feed('An ad is playing on your end — the room keeps going; you\u2019ll snap back in sync when it ends');
+      else { player.seekTo(offsetFor(S.now)); lastSeekAt = Date.now(); }
+    },
   }
 );
 player.setVolume(S.volume);
@@ -612,8 +621,17 @@ function tick() {
   renderConn();
 }
 
-/* progress loop (rAF) + drift correction every ~20s */
-let lastResyncAt = 0;
+/* progress loop (rAF) + CLEAN SYNC (build 3, Joshua's spec):
+ * under ~1s off is together — hands completely off, no seeks, no rate
+ * tricks, nothing that can stall or slow playback. Over 1s off gets
+ * ONE clean seek to the room position (same as a refresh landing),
+ * at most once per 15s. And never seek a player whose position is
+ * frozen — a frozen needle means it's still LOADING, and piling a
+ * seek onto a load just restarts the buffering. */
+let lastSeekAt = 0, lastCheckAt = 0, lastPosSample = null, lastPosSampleAt = 0;
+const DRIFT_TOLERANCE = 1.0;   // seconds — his line: past this it stops feeling together
+const SEEK_COOLDOWN = 15000;
+const CHECK_EVERY = 4000;
 function progressLoop() {
   requestAnimationFrame(progressLoop);
   if (!S.now) return;
@@ -631,9 +649,22 @@ function progressLoop() {
     timeDur.textContent = '';
   }
   const nowMs = Date.now();
-  if (nowMs - lastResyncAt > 20000 && pos != null) {
-    lastResyncAt = nowMs;
-    if (Math.abs(pos - expected) > 2.5 && expected > 2) player.seekTo(expected);
+  if (pos != null && nowMs - lastCheckAt > CHECK_EVERY) {
+    const stalled = lastPosSample != null && (nowMs - lastPosSampleAt) >= 3000 &&
+      Math.abs(pos - lastPosSample) < 0.05;
+    lastCheckAt = nowMs;
+    lastPosSample = pos; lastPosSampleAt = nowMs;
+    // Never seek past what's buffered on a media element — landing in
+    // unbuffered territory restarts its download and the "resync"
+    // becomes the thing wrecking playback. It'll be in range shortly;
+    // the next check catches it then.
+    const bufEnd = player.bufferedEnd();
+    const seekWouldThrash = bufEnd != null && expected > bufEnd - 0.25;
+    if (!stalled && !seekWouldThrash && expected > 2 && Math.abs(pos - expected) > DRIFT_TOLERANCE &&
+        nowMs - lastSeekAt > SEEK_COOLDOWN) {
+      lastSeekAt = nowMs;
+      player.seekTo(expected);
+    }
   }
 }
 requestAnimationFrame(progressLoop);
@@ -1079,4 +1110,8 @@ window.__cue = {
   startRoom,
   advance,
   cid: () => myCid,
+  pos: () => player.pos(),
+  inAd: () => player.inAd(),
+  seekTo: (s) => player.seekTo(s),
+  expected: () => (S.now ? offsetFor(S.now) : null),
 };
