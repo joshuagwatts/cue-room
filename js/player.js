@@ -1,16 +1,100 @@
-/* Cue Room player — build 2.
+/* Cue Room player — build 5.
  * One player at a time, driven by the room clock: play(item, offsetSec).
  * Providers: youtube (IFrame API, visible stage), soundcloud (widget API,
  * visible stage), direct-audio / bandcamp / drive (one <video> element —
  * it plays audio files fine and gives video files a picture for free).
  *
- * Hooks: onEnded, onError(msg), onPlaying, onDuration(sec).
+ * Hooks: onEnded, onError(msg), onPlaying, onDuration(sec), onAdChange(inAd).
  * Load watchdog: if nothing is playing 15s after start, onError fires —
  * a dead track skips itself instead of wedging the room (limbo build 104).
  */
-import { loadYTApi, loadSCApi, isShortSCLink, resolveShortSCLink, driveStreamUrl, driveFallbackUrls } from './providers.js?v=2';
+import { loadYTApi, loadSCApi, isShortSCLink, resolveShortSCLink, driveStreamUrl, driveFallbackUrls } from './providers.js?v=5';
 
 const WATCHDOG_MS = 15000;
+
+/* ---------------- AdWatch (build 5) ----------------
+ * YouTube and SoundCloud embeds are sealed: no ad events, no ad
+ * skipping, no way to see the ad directly. But an ad REPLACES the
+ * timeline — the duration flips to the ad's length and the needle
+ * restarts at zero — and that's visible from outside. Build 3 watched
+ * only the duration flip and adopted the "content duration" at player
+ * ready, which a pre-roll ad poisons instantly (the first duration it
+ * ever sees IS the ad's). Real-world result: detection inverted or
+ * never fired, and ads dragged sync around.
+ *
+ * AdWatch fuses the signals instead:
+ *  - a duration is only ADOPTED as the content's when the needle is
+ *    sitting on the room timeline (within 3.5s of expected) — an ad
+ *    playing to a mid-track joiner never gets adopted;
+ *  - ENTER ad: the duration flips >1.5s away from the adopted one, OR
+ *    the needle resets backwards >2s with no seek of ours nearby;
+ *  - EXIT ad: the duration comes back, OR the needle catches up to
+ *    where the content left off (re-adopting the duration if the
+ *    "content" we adopted was itself the pre-roll — the fresh-track
+ *    ambiguity resolves itself there), OR a 150s failsafe.
+ * While inAd, the player reports NO position and the ADOPTED duration
+ * only: the room never chases an ad, never records an ad's length as
+ * the track's, and watchdogs wait the ad out. On exit the app fires
+ * one clean seek back to the room position. */
+export class AdWatch {
+  constructor(onChange, onDur) {
+    this.onChange = onChange || null;
+    this.onDur = onDur || null;
+    this.contentDur = 0;
+    this.inAd = false;
+    this.adSince = 0;
+    this.lastPos = null;
+    this.lastSeekAt = 0;
+    this.durReported = 0;
+  }
+  noteSeek() { this.lastSeekAt = Date.now(); }
+  _set(v, viaDur) {
+    if (v === this.inAd) return;
+    this.inAd = v;
+    if (v) this.adViaDur = !!viaDur;
+    this.adSince = v ? Date.now() : 0;
+    if (this.onChange) { try { this.onChange(v); } catch (e) {} }
+  }
+  _adopt(dur) {
+    if (dur > 0 && Math.abs(dur - this.contentDur) > 0.5) {
+      this.contentDur = dur;
+      if (this.onDur && this.durReported !== dur) {
+        this.durReported = dur;
+        try { this.onDur(dur); } catch (e) {}
+      }
+    }
+  }
+  sample(dur, pos, playing, expected) {
+    if (!playing || pos == null || !(pos >= 0)) return this.inAd;
+    const now = Date.now();
+    if (this.inAd && now - this.adSince > 150000) {
+      this._set(false);
+      this.lastPos = pos;
+      if (dur > 0) this._adopt(dur);
+      return this.inAd;
+    }
+    const nearExpected = expected != null && Math.abs(pos - expected) <= 3.5;
+    if (!this.inAd) {
+      if (dur > 0 && (!this.contentDur || nearExpected)) this._adopt(dur);
+      if (this.contentDur && dur > 0 && Math.abs(dur - this.contentDur) > 1.5) { this._set(true, true); return this.inAd; }
+      if (this.lastPos != null && pos < this.lastPos - 2 && now - this.lastSeekAt > 3000) { this._set(true, false); return this.inAd; }
+      this.lastPos = pos;
+    } else {
+      // "Duration came back" only ends an ad that a duration flip
+      // STARTED — if the embed reports the content duration straight
+      // through the ad (reset-only breaks), that signal is noise and
+      // the needle catching up is the only honest exit.
+      if (this.adViaDur && this.contentDur && dur > 0 && Math.abs(dur - this.contentDur) <= 1.5) {
+        this._set(false); this.lastPos = pos; return this.inAd;
+      }
+      if (this.lastPos != null && pos >= this.lastPos - 2) {
+        if (dur > 0 && (!this.contentDur || Math.abs(dur - this.contentDur) > 1.5)) this._adopt(dur);
+        this._set(false); this.lastPos = pos; return this.inAd;
+      }
+    }
+    return this.inAd;
+  }
+}
 
 export class Player {
   constructor(els, hooks) {
@@ -63,6 +147,10 @@ export class Player {
     this._clearWatchdog();
     this.watchdog = setTimeout(() => {
       if (this.currentId !== id) return;
+      // An ad is not a stall: pos() is null by design while one plays,
+      // and killing the track at 15s is how ads used to skip songs.
+      // Wait the ad out and check again after.
+      if (this.inAd()) { this._armWatchdog(id, retry); return; }
       const p = this.pos();
       const playing = this.kind === 'media' ? !this.els.media.paused : (p != null && p > 0.05);
       if (playing) return;
@@ -100,7 +188,11 @@ export class Player {
     this.els.yt.classList.add('on');
     const slot = document.createElement('div');
     this.els.yt.appendChild(slot);
-    let ytInAd = false, ytAdPoll = null;
+    const watch = new AdWatch(
+      (v) => { if (this.hooks.onAdChange) this.hooks.onAdChange(v); },
+      (d) => this.hooks.onDuration(d)
+    );
+    let sampler = null;
     loadYTApi((ok) => {
       if (this.currentId !== item.id) { try { slot.remove(); } catch (e) {} return; }
       if (!ok || !window.YT) { this.hooks.onError('youtube isn\u2019t loading — check your connection'); return; }
@@ -113,35 +205,27 @@ export class Player {
             onReady: (ev) => {
               try { ev.target.setVolume(Math.round(this.volume * 100)); } catch (e) {}
               const off = this.hooks.offsetFor ? this.hooks.offsetFor() : offset;
+              watch.noteSeek();
               try { if (off > 1) ev.target.seekTo(off, true); } catch (e) {}
               try { ev.target.playVideo(); } catch (e) {}
-              const d = (() => { try { return ev.target.getDuration(); } catch (e) { return 0; } })();
-              if (d > 0) this.hooks.onDuration(d);
+              // NOTE: no duration is reported here anymore — at ready
+              // time a pre-roll ad may be what's loaded, and its length
+              // is not the track's. AdWatch adopts (and reports) the
+              // real duration only once the needle sits on the room
+              // timeline.
               // Watchdog retry is a play() nudge ONLY — never a reload.
-              // Reloading a slow-loading video restarts its buffering
-              // from zero; the room clock doesn't get to punish loads.
               this._armWatchdog(item.id, () => {
                 try { ev.target.playVideo(); } catch (e) {}
               });
-              // Ad detection (build 3): YouTube's sealed player gives
-              // no ad events, but during an ad getDuration() flips to
-              // the AD's length. While flipped: pos() reports null (so
-              // the room never chases the ad timeline), and when the
-              // flip ends the app does ONE clean seek back to the room.
-              let contentDur = d > 0 ? d : 0;
-              const adPoll = setInterval(() => {
-                if (this.currentId !== item.id) { clearInterval(adPoll); return; }
-                let dd = 0;
-                try { dd = ev.target.getDuration() || 0; } catch (e) {}
-                if (dd <= 0) return;
-                if (!contentDur) { contentDur = dd; return; }
-                const inAdNow = Math.abs(dd - contentDur) > 1.5;
-                if (inAdNow !== ytInAd) {
-                  ytInAd = inAdNow;
-                  if (this.hooks.onAdChange) { try { this.hooks.onAdChange(ytInAd); } catch (e) {} }
-                }
+              sampler = setInterval(() => {
+                if (this.currentId !== item.id) { clearInterval(sampler); return; }
+                let st = -1, pos = null, dur = 0;
+                try { st = ev.target.getPlayerState(); } catch (e) {}
+                try { pos = ev.target.getCurrentTime(); } catch (e) {}
+                try { dur = ev.target.getDuration() || 0; } catch (e) {}
+                const expected = this.hooks.offsetFor ? this.hooks.offsetFor() : null;
+                watch.sample(dur, pos, st === window.YT.PlayerState.PLAYING, expected);
               }, 1000);
-              ytAdPoll = adPoll;
             },
             onStateChange: (ev) => {
               if (ev.data === window.YT.PlayerState.PLAYING) this.hooks.onPlaying();
@@ -152,14 +236,14 @@ export class Player {
         });
         this.impl = {
           play: () => p.playVideo(), pause: () => p.pauseVideo(),
-          seekTo: (s) => p.seekTo(s, true),
+          seekTo: (s) => { watch.noteSeek(); p.seekTo(s, true); },
           // During an ad the iframe's clock is the AD's clock — report
           // nothing, so drift logic leaves this player completely alone.
-          pos: () => { if (ytInAd) return null; try { return p.getCurrentTime(); } catch (e) { return null; } },
-          dur: () => { try { return p.getDuration() || null; } catch (e) { return null; } },
-          inAd: () => ytInAd,
+          pos: () => { if (watch.inAd) return null; try { return p.getCurrentTime(); } catch (e) { return null; } },
+          dur: () => { if (watch.contentDur > 0) return watch.contentDur; try { return p.getDuration() || null; } catch (e) { return null; } },
+          inAd: () => watch.inAd,
           setVolume: (v) => { try { p.setVolume(v); } catch (e) {} },
-          destroy: () => { if (ytAdPoll) clearInterval(ytAdPoll); try { p.destroy(); } catch (e) {} },
+          destroy: () => { if (sampler) clearInterval(sampler); try { p.destroy(); } catch (e) {} },
         };
       } catch (e) { this.hooks.onError('youtube player failed to start'); }
     });
@@ -186,23 +270,37 @@ export class Player {
       if (!ok) { this.hooks.onError('soundcloud isn\u2019t loading — check your connection'); return; }
       try {
         const w = window.SC.Widget(iframe);
-        let lastPos = null, lastDur = null, playAt = 0, peakMs = 0, posIv = null;
+        let lastPos = null, lastDur = null, playAt = 0, peakMs = 0, posIv = null, scPlaying = false;
+        const watch = new AdWatch(
+          (v) => { if (this.hooks.onAdChange) this.hooks.onAdChange(v); },
+          (d) => this.hooks.onDuration(d)
+        );
         w.bind(window.SC.Widget.Events.READY, () => {
           try { w.setVolume(Math.round(this.volume * 100)); } catch (e) {}
           const off = this.hooks.offsetFor ? this.hooks.offsetFor() : offset;
+          watch.noteSeek();
           try { if (off > 1) w.seekTo(Math.round(off * 1000)); } catch (e) {}
           try { w.play(); } catch (e) {}
-          try { w.getDuration((ms) => { if (ms > 0) { lastDur = ms / 1000; this.hooks.onDuration(ms / 1000); } }); } catch (e) {}
+          // Duration is NOT reported straight from the widget anymore
+          // (build 5): if SoundCloud inserts an ad, its length is not
+          // the track's. AdWatch adopts + reports via the sampler.
           this._armWatchdog(item.id, () => { try { w.play(); } catch (e) {} });
         });
         w.bind(window.SC.Widget.Events.PLAY, () => {
-          playAt = Date.now(); this.hooks.onPlaying();
-          if (!posIv) posIv = setInterval(() => { try { w.getPosition((ms) => { if (ms > peakMs) peakMs = ms; }); } catch (e) {} }, 1000);
+          playAt = Date.now(); scPlaying = true; this.hooks.onPlaying();
+          if (!posIv) posIv = setInterval(() => {
+            try { w.getPosition((ms) => { if (ms > peakMs) peakMs = ms; lastPos = ms / 1000; }); } catch (e) {}
+            try { w.getDuration((ms) => { if (ms > 0) lastDur = ms / 1000; }); } catch (e) {}
+            const expected = this.hooks.offsetFor ? this.hooks.offsetFor() : null;
+            watch.sample(lastDur || 0, lastPos, scPlaying, expected);
+          }, 1000);
         });
         w.bind(window.SC.Widget.Events.PAUSE, () => {
+          scPlaying = false;
           // PLAY then a quick PAUSE with the needle never moving = the
           // audio stream died upstream (limbo build 58). Say so, move on.
-          if (playAt && Date.now() - playAt < 12000 && peakMs < 2000 && this.currentId === item.id) {
+          // Build 5: not while an ad is on — an ad boundary can pause.
+          if (!watch.inAd && playAt && Date.now() - playAt < 12000 && peakMs < 2000 && this.currentId === item.id) {
             playAt = 0;
             this.hooks.onError('that track\u2019s audio wouldn\u2019t load on soundcloud');
           }
@@ -211,9 +309,10 @@ export class Player {
         w.bind(window.SC.Widget.Events.ERROR, () => this.hooks.onError('soundcloud refused that track'));
         this.impl = {
           play: () => w.play(), pause: () => w.pause(),
-          seekTo: (s) => w.seekTo(Math.round(s * 1000)),
-          pos: () => { try { w.getPosition((ms) => { lastPos = ms / 1000; }); } catch (e) {} return lastPos; },
-          dur: () => { try { w.getDuration((ms) => { lastDur = ms / 1000; }); } catch (e) {} return lastDur; },
+          seekTo: (s) => { watch.noteSeek(); w.seekTo(Math.round(s * 1000)); },
+          pos: () => { if (watch.inAd) return null; try { w.getPosition((ms) => { lastPos = ms / 1000; }); } catch (e) {} return lastPos; },
+          dur: () => { if (watch.contentDur > 0) return watch.contentDur; try { w.getDuration((ms) => { lastDur = ms / 1000; }); } catch (e) {} return lastDur; },
+          inAd: () => watch.inAd,
           setVolume: (v) => { try { w.setVolume(v); } catch (e) {} },
           destroy: () => { try { if (posIv) clearInterval(posIv); } catch (e) {} try { iframe.remove(); } catch (e) {} },
         };

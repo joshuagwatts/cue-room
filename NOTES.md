@@ -145,6 +145,46 @@ tracks at 0.04s. Full suite, sync suite, drive test: all pass.
 (Test note: the main suite's solo-skip step now waits out the fake
 voter's 25s roster TTL — it previously passed on timing luck.)
 
+## Build 5 — ads, taken seriously (2026-10-27, Joshua: "the youtube ad thing be fucking with the whole synchronized situation" + "soundcloud prolly will too")
+
+He was right — build 3's detector failed in the real world. Autopsy:
+it adopted the "content duration" from the player's ready event,
+which during a pre-roll ad IS the ad's length (detection inverted or
+never fired), it had no answer for embeds that keep reporting the
+content duration straight through an ad, the load watchdog could
+kill a track 15s into a 30s ad (position reads null in an ad), an
+ad-poisoned duration could cut the track via the end watchdog, and
+SoundCloud had no detection at all.
+
+Build 5 replaces it with AdWatch (js/player.js), shared by the
+YouTube and SoundCloud players:
+- Durations are ADOPTED as the content's only when the needle sits
+  on the room timeline (within 3.5s of expected) — a pre-roll shown
+  to a mid-track joiner is never adopted; adoption is what reports
+  the duration to the room, so ad lengths never poison durationMs.
+- Enter ad on EITHER signal: duration flips >1.5s from adopted, or
+  the needle resets >2s with no seek of ours nearby. Exit on the
+  matching signal (duration-restore only counts for flip-entered
+  ads — unit test 4 caught that cross-talk), needle catch-up
+  (re-adopting duration — resolves the fresh-track pre-roll
+  ambiguity), or a 150s failsafe.
+- While in an ad: position reports null (room never chases it), the
+  load watchdog re-arms instead of erroring (ads can't skip songs),
+  the end watchdog stands down, SoundCloud's dead-stream pause
+  detector stands down (ad boundaries can pause), and on exit the
+  app fires its one clean seek (unchanged build-3 path).
+PROOF: cue-adwatch.mjs — 7 synthetic sample streams (clean,
+joiner pre-roll, mid-roll flip, reset-only break, own-seek,
+buffering, fresh-track pre-roll): ALL PASS, including exactly one
+ad-start/ad-end pair for the mid-roll. Full/sync/steady/drive
+suites pass. Still unprovable in the sandbox: a REAL ad break —
+headless test players don't draw ads. The detector's inputs are the
+same numbers a real ad produces; his next hangout is the live proof.
+Honest limit, unchanged: an ad victim's content pauses while the
+room plays on — inside the official embeds nothing can reclaim
+those seconds; what changed is the ad can no longer drag, skip, or
+desync anyone, and the victim snaps back clean when it ends.
+
 ## Known limits
 
 - Two-phone live proof is Joshua's phones, as with limboverse: this

@@ -13,16 +13,16 @@
  * canonical queue, broadcasts syncs, inherits the line via handoff
  * when elected, and advances past broken tracks so the room never
  * wedges on a dead link. */
-import { Relay } from './relay.js?v=2';
+import { Relay } from './relay.js?v=5';
 import {
   detectProvider, fallbackTitle, extractUrl, fetchTitle, sniffAudioContentType,
   resolveShortSCLink, resolveSCSet, resolveYTPlaylist, resolveBandcamp,
   driveStreamUrl, swapIdentifySpotify, swapSearchYT, swapMatch, swapJudge,
   swapAuditText, validAdd, validPlay, MAX_QUEUE,
-} from './providers.js?v=2';
-import { Player } from './player.js?v=2';
+} from './providers.js?v=5';
+import { Player } from './player.js?v=5';
 
-const BUILD = 4;
+const BUILD = 5;
 const APP_TAG = 'cueroom_by_holowatts';
 const HELLO_MS = 8000, ROSTER_TTL_MS = 25000, SYNC_MS = 10000, HANDOFF_MS = 2500;
 const ACK_MS = 20000, ACK_RETRIES = 8;
@@ -706,7 +706,7 @@ function tick() {
   // if my player is happily playing PAST the "duration" (an ad's
   // length got recorded, a wrong metadata value), the duration is
   // the liar, not the track: distrust it instead of skipping.
-  if (S.now && S.now.durationMs) {
+  if (S.now && S.now.durationMs && !player.inAd()) {
     const dur = S.now.durationMs / 1000;
     const elapsed = offsetFor(S.now);
     const pos = player.pos();
