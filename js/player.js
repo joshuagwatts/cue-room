@@ -1,4 +1,4 @@
-/* Cue Room player — build 5.
+/* Cue Room player — build 6.
  * One player at a time, driven by the room clock: play(item, offsetSec).
  * Providers: youtube (IFrame API, visible stage), soundcloud (widget API,
  * visible stage), direct-audio / bandcamp / drive (one <video> element —
@@ -8,11 +8,11 @@
  * Load watchdog: if nothing is playing 15s after start, onError fires —
  * a dead track skips itself instead of wedging the room (limbo build 104).
  */
-import { loadYTApi, loadSCApi, isShortSCLink, resolveShortSCLink, driveStreamUrl, driveFallbackUrls } from './providers.js?v=5';
+import { loadYTApi, loadSCApi, isShortSCLink, resolveShortSCLink, driveStreamUrl, driveFallbackUrls } from './providers.js?v=6';
 
 const WATCHDOG_MS = 15000;
 
-/* ---------------- AdWatch (build 5) ----------------
+/* ---------------- AdWatch (build 6) ----------------
  * YouTube and SoundCloud embeds are sealed: no ad events, no ad
  * skipping, no way to see the ad directly. But an ad REPLACES the
  * timeline — the duration flips to the ad's length and the needle
@@ -282,7 +282,7 @@ export class Player {
           try { if (off > 1) w.seekTo(Math.round(off * 1000)); } catch (e) {}
           try { w.play(); } catch (e) {}
           // Duration is NOT reported straight from the widget anymore
-          // (build 5): if SoundCloud inserts an ad, its length is not
+          // (build 6): if SoundCloud inserts an ad, its length is not
           // the track's. AdWatch adopts + reports via the sampler.
           this._armWatchdog(item.id, () => { try { w.play(); } catch (e) {} });
         });
@@ -298,7 +298,7 @@ export class Player {
         w.bind(window.SC.Widget.Events.PAUSE, () => {
           scPlaying = false;
           // PLAY then a quick PAUSE with the needle never moving = the
-          // audio stream died upstream (limbo build 58). Say so, move on.
+          // audio stream died upstream (limbo build 68). Say so, move on.
           // Build 5: not while an ad is on — an ad boundary can pause.
           if (!watch.inAd && playAt && Date.now() - playAt < 12000 && peakMs < 2000 && this.currentId === item.id) {
             playAt = 0;

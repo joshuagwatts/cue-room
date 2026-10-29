@@ -185,6 +185,40 @@ room plays on — inside the official embeds nothing can reclaim
 those seconds; what changed is the ad can no longer drag, skip, or
 desync anyone, and the victim snaps back clean when it ends.
 
+## Build 6 — iPhone pass (2026-10-29, Joshua: "make sure cue room works on the iphone too")
+
+Full static iOS audit, then fixes:
+- THE bug: the join-music tap marked the device unlocked and hid
+  the button BEFORE knowing any sound existed. Player readiness is
+  async (YT/SC API callbacks; short SC links resolve first), so a
+  quick iPhone tap could be consumed by a not-yet-existent player —
+  silent phone, recovery button gone forever. Now the tap only asks;
+  onPlaying confirms, sets unlocked, and retires the button. If no
+  confirmation in 3s the button relabels itself: "Still quiet? Tap
+  the video itself ▶ then tap here again" (Safari sometimes only
+  accepts activation on the player itself).
+- apple-touch-icon (180px, generated from the 512) +
+  apple-mobile-web-app-capable/status-bar meta — Add to Home Screen
+  now gets a real icon and standalone chrome.
+- Startup localStorage reads routed through safeGet() — Safari with
+  blocked storage throws on getItem; an exception at module top
+  would have killed the app before the landing painted.
+- Volume slider on iOS replaced with "use the phone's buttons" —
+  iOS ignores programmatic media volume; a slider that lies is
+  worse than none.
+- Share button double-failure no longer silent: "Long-press the
+  link above to copy it."
+Audit-cleared as already fine: playsinline everywhere, no 100vh
+trap (document flow + safe-area-padded fixed add bar), QR joining
+needs no in-app camera (system Camera scan), WebSocket/JS feature
+floor is Safari-15-safe.
+PROOF GAP, stated plainly: the sandbox's local Chromium broke on
+2026-10-29 (new build demands a daemon-supplied WebGL policy —
+"Normal startup requires the image-owned WebGL policy"), so the
+automated suites (incl. the new iPhone-emulated cue-ios.mjs) could
+not run for this build. Verification = static audit + syntax +
+served-bytes + live boot check. The decisive test is a real iPhone.
+
 ## Known limits
 
 - Two-phone live proof is Joshua's phones, as with limboverse: this

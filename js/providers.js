@@ -1,4 +1,4 @@
-/* Cue Room providers — build 5.
+/* Cue Room providers — build 6.
  * Link detection, title lookup, set/playlist expansion and the Spotify
  * swap matcher, ported from the limboverse/holoverse jukebox (the code
  * Joshua's rooms have run on since build 21, universal queue build 3).

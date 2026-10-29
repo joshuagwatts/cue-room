@@ -13,16 +13,16 @@
  * canonical queue, broadcasts syncs, inherits the line via handoff
  * when elected, and advances past broken tracks so the room never
  * wedges on a dead link. */
-import { Relay } from './relay.js?v=5';
+import { Relay } from './relay.js?v=6';
 import {
   detectProvider, fallbackTitle, extractUrl, fetchTitle, sniffAudioContentType,
   resolveShortSCLink, resolveSCSet, resolveYTPlaylist, resolveBandcamp,
   driveStreamUrl, swapIdentifySpotify, swapSearchYT, swapMatch, swapJudge,
   swapAuditText, validAdd, validPlay, MAX_QUEUE,
-} from './providers.js?v=5';
-import { Player } from './player.js?v=5';
+} from './providers.js?v=6';
+import { Player } from './player.js?v=6';
 
-const BUILD = 5;
+const BUILD = 6;
 const APP_TAG = 'cueroom_by_holowatts';
 const HELLO_MS = 8000, ROSTER_TTL_MS = 25000, SYNC_MS = 10000, HANDOFF_MS = 2500;
 const ACK_MS = 20000, ACK_RETRIES = 8;
@@ -61,9 +61,13 @@ function joinUrl(code) {
   return location.origin + location.pathname + '?room=' + code + '#room=' + code;
 }
 
-let myCid = localStorage.getItem('cueroom-cid');
+/* Storage reads go through safeGet (build 6): Safari with blocked
+ * storage throws on getItem, and an exception at module top would
+ * stop the whole app before the landing page even paints. */
+function safeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+let myCid = safeGet('cueroom-cid');
 if (!myCid) { myCid = makeCid(); try { localStorage.setItem('cueroom-cid', myCid); } catch (e) {} }
-let myName = (localStorage.getItem('cueroom-name') || '').slice(0, 16);
+let myName = (safeGet('cueroom-name') || '').slice(0, 16);
 
 /* ---------------- state ---------------- */
 
@@ -80,8 +84,8 @@ const S = {
   skipVotes: new Map(),        // voterCid -> name, for the current track
   skipConfirmTimer: null,
   feed: [],
-  volume: (() => { const v = Number(localStorage.getItem('cueroom-vol')); return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.8; })(),
-  unlocked: false,
+  volume: (() => { const v = Number(safeGet('cueroom-vol')); return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.8; })(),
+  unlocked: false, unlockNudgeTimer: null,
   errAdvancedFor: null, endedNotifiedFor: null, badReportedFor: null,
   swapVerifyPending: null,
   nowOriginCid: null,          // whose clock startedAt belongs to (skew)
@@ -114,7 +118,15 @@ const player = new Player(
     offsetFor: () => offsetFor(S.now),
     onEnded: () => onPlayerEnded(),
     onError: (msg) => onTrackError(msg),
-    onPlaying: () => { joinMusicBtn.style.display = 'none'; },
+    onPlaying: () => {
+      // Playback CONFIRMED (build 6): only now is the device unlocked
+      // and the join-music button retired. iOS taught us the tap alone
+      // proves nothing — see the click handler.
+      S.unlocked = true;
+      if (S.unlockNudgeTimer) { clearTimeout(S.unlockNudgeTimer); S.unlockNudgeTimer = null; }
+      joinMusicBtn.textContent = '▶ Tap to join the music';
+      joinMusicBtn.style.display = 'none';
+    },
     onDuration: (sec) => {
       if (S.now && sec > 0) { S.now.durationMs = Math.round(sec * 1000); renderNow(); }
     },
@@ -131,12 +143,22 @@ const player = new Player(
   }
 );
 player.setVolume(S.volume);
-$('vol').value = Math.round(S.volume * 100);
-$('vol').addEventListener('input', (e) => {
-  S.volume = Number(e.target.value) / 100;
-  player.setVolume(S.volume);
-  try { localStorage.setItem('cueroom-vol', String(S.volume)); } catch (err) {}
-});
+/* iOS ignores programmatic volume on media elements (and mostly in
+ * the embeds too) — the phone's buttons are the volume there. Don't
+ * show a slider that lies: swap it for that note (build 6). */
+if (/iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+  const vr = document.querySelector('.vol-row');
+  if (vr) vr.innerHTML = '<span>volume: use the phone\u2019s buttons on iPhone</span>';
+}
+if ($('vol')) {
+  $('vol').value = Math.round(S.volume * 100);
+  $('vol').addEventListener('input', (e) => {
+    S.volume = Number(e.target.value) / 100;
+    player.setVolume(S.volume);
+    try { localStorage.setItem('cueroom-vol', String(S.volume)); } catch (err) {}
+  });
+}
 
 /* ---------------- feed / hints ---------------- */
 
@@ -1095,9 +1117,20 @@ function updateJoinMusic() {
   joinMusicBtn.style.display = S.now && !S.unlocked ? '' : 'none';
 }
 joinMusicBtn.addEventListener('click', () => {
-  S.unlocked = true;
-  joinMusicBtn.style.display = 'none';
+  // Build 6 (iPhone): do NOT mark unlocked or hide the button here.
+  // The tap can land before any player exists — the YouTube and
+  // SoundCloud APIs load async, and a short SoundCloud link resolves
+  // first — and playPauseResume() then silently no-ops. The old code
+  // consumed the tap anyway, leaving iPhones silent with the only
+  // recovery button gone. Now the button survives until onPlaying
+  // confirms sound is actually flowing; if it isn't within a few
+  // seconds, the button itself tells you the next move (Safari
+  // sometimes only accepts a tap on the player itself).
   player.playPauseResume();
+  if (S.unlockNudgeTimer) clearTimeout(S.unlockNudgeTimer);
+  S.unlockNudgeTimer = setTimeout(() => {
+    if (!S.unlocked) joinMusicBtn.textContent = 'Still quiet? Tap the video itself ▶ then tap here again';
+  }, 3000);
 });
 
 /* ---------------- share / QR ---------------- */
@@ -1133,11 +1166,16 @@ $('share-btn').addEventListener('click', () => {
 $('close-share-btn').addEventListener('click', () => { sharePanel.style.display = 'none'; });
 $('copy-link-btn').addEventListener('click', async () => {
   const link = joinUrl(S.room);
-  try { await navigator.clipboard.writeText(link); $('copy-link-btn').textContent = 'Copied ✓'; }
+  const btn = $('copy-link-btn');
+  try { await navigator.clipboard.writeText(link); btn.textContent = 'Copied ✓'; }
   catch (e) {
-    if (navigator.share) { try { await navigator.share({ title: 'Cue Room ' + S.room, url: link }); } catch (err) {} }
+    let shared = false;
+    if (navigator.share) { try { await navigator.share({ title: 'Cue Room ' + S.room, url: link }); shared = true; } catch (err) {} }
+    // Both routes failed (some in-app browsers): don't fail silently —
+    // the link is right there on the share panel to long-press.
+    if (!shared) btn.textContent = 'Long-press the link above to copy it';
   }
-  setTimeout(() => { $('copy-link-btn').textContent = 'Copy link'; }, 2000);
+  setTimeout(() => { btn.textContent = 'Copy link'; }, 2600);
 });
 $('leave-btn').addEventListener('click', leaveRoom);
 
